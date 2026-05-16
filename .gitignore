@@ -2,3 +2,4 @@ __pycache__/
 *.py[cod]
 weekly_commit_analysis.md
 reports/
+.env
