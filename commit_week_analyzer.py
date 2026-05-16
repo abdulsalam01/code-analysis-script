@@ -4,7 +4,7 @@
 This script clones or updates a GitHub repository, collects commits from a time
 window, estimates implementation time from commit activity, and reviews code
 quality using deterministic heuristics. Optionally, it can send a carefully
-structured prompt to OpenAI's Responses API for an LLM-assisted narrative review.
+structured prompt to Google's Gemini API for an LLM-assisted narrative review.
 
 Requires Python 3.14.2+ and Git on PATH. The core analysis uses only the Python
 standard library.
@@ -24,6 +24,7 @@ import sys
 import tempfile
 import textwrap
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -392,23 +393,32 @@ def build_llm_prompt(
     ).strip()
 
 
-def call_openai(prompt: str, model: str) -> str:
-    api_key = os.environ.get("OPENAI_API_KEY")
+def call_gemini(prompt: str, model: str) -> str:
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is not set")
+        raise RuntimeError("GEMINI_API_KEY is not set")
+
     payload = json.dumps(
         {
-            "model": model,
-            "input": prompt,
-            "temperature": 0.2,
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": prompt}],
+                }
+            ],
+            "generationConfig": {
+                "temperature": 0.2,
+            },
         }
     ).encode()
+    quoted_model = urllib.parse.quote(model, safe="")
     request = urllib.request.Request(
-        "https://api.openai.com/v1/responses",
+        "https://generativelanguage.googleapis.com/"
+        f"v1beta/models/{quoted_model}:generateContent",
         data=payload,
         headers={
-            "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
+            "x-goog-api-key": api_key,
         },
         method="POST",
     )
@@ -417,15 +427,21 @@ def call_openai(prompt: str, model: str) -> str:
             data = json.loads(response.read().decode())
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode(errors="replace")
-        raise RuntimeError(f"OpenAI request failed: {exc.code} {detail}") from exc
-    if text := data.get("output_text"):
-        return text
+        raise RuntimeError(f"Gemini request failed: {exc.code} {detail}") from exc
+
     chunks: list[str] = []
-    for item in data.get("output", []):
-        for content in item.get("content", []):
-            if content.get("type") in {"output_text", "text"}:
-                chunks.append(content.get("text", ""))
-    return "\n".join(chunks).strip()
+    for candidate in data.get("candidates", []):
+        content = candidate.get("content", {})
+        for part in content.get("parts", []):
+            if text := part.get("text"):
+                chunks.append(text)
+    if chunks:
+        return "\n".join(chunks).strip()
+
+    prompt_feedback = data.get("promptFeedback")
+    if prompt_feedback:
+        raise RuntimeError(f"Gemini returned no text. promptFeedback={prompt_feedback}")
+    raise RuntimeError("Gemini returned no text candidates")
 
 
 def render_markdown(
@@ -495,15 +511,19 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--output", type=Path, default=Path("weekly_commit_analysis.md"))
     parser.add_argument("--json-output", type=Path, help="Optional path for machine-readable JSON")
     parser.add_argument(
-        "--use-openai",
+        "--use-gemini",
         action="store_true",
-        help="Call OpenAI Responses API for narrative analysis",
+        help="Call Gemini API for narrative analysis",
     )
-    parser.add_argument("--model", default="gpt-5.5", help="OpenAI model for --use-openai (default: gpt-5.5)")
+    parser.add_argument(
+        "--model",
+        default="gemini-2.5-flash",
+        help="Gemini model for --use-gemini (default: gemini-2.5-flash)",
+    )
     parser.add_argument(
         "--print-prompt",
         action="store_true",
-        help="Print the analysis prompt without calling OpenAI",
+        help="Print the analysis prompt without calling Gemini",
     )
     return parser.parse_args(argv)
 
@@ -526,8 +546,8 @@ def main(argv: list[str] | None = None) -> int:
     llm_text = None
     if args.print_prompt:
         print(prompt)
-    if args.use_openai:
-        llm_text = call_openai(prompt, args.model)
+    if args.use_gemini:
+        llm_text = call_gemini(prompt, args.model)
 
     report = render_markdown(repo, commits, score, findings, metrics, hours, llm_text)
     args.output.parent.mkdir(parents=True, exist_ok=True)

@@ -35,10 +35,10 @@ To review the carefully tuned LLM prompt without making an API call:
 python3.14 commit_week_analyzer.py /path/to/repo --print-prompt
 ```
 
-To add an LLM-assisted narrative analysis, set `OPENAI_API_KEY` and pass `--use-openai`:
+To add an LLM-assisted narrative analysis, set `GEMINI_API_KEY` and pass `--use-gemini`:
 
 ```bash
-OPENAI_API_KEY=... python3.14 commit_week_analyzer.py /path/to/repo --use-openai
+GEMINI_API_KEY=... python3.14 commit_week_analyzer.py /path/to/repo --use-gemini
 ```
 
 ## Prompt accuracy notes
