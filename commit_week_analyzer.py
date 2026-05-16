@@ -6,8 +6,8 @@ window, estimates implementation time from commit activity, and reviews code
 quality using deterministic heuristics. Optionally, it can send a carefully
 structured prompt to Google's Gemini API for an LLM-assisted narrative review.
 
-Requires Python 3.14.2+ and Git on PATH. The core analysis uses only the Python
-standard library.
+Requires Python 3.14.2+ and Git on PATH. The script uses only the Python
+standard library and loads project defaults from a .env file when present.
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
+
 
 UTC = dt.UTC
 SECRET_PATTERNS = [
@@ -497,38 +498,96 @@ def render_markdown(
     return "\n".join(lines) + "\n"
 
 
+def load_env_file(path: Path = Path(".env")) -> None:
+    """Load simple KEY=VALUE pairs from a .env file without overriding existing environment."""
+    if not path.exists():
+        return
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    """Read a boolean value from the environment."""
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Analyze GitHub/Git commits from the past week.")
-    parser.add_argument("repo", help="GitHub URL or local Git repository path")
-    parser.add_argument("--branch", help="Branch to checkout before analysis")
-    parser.add_argument("--author", help="Git author pattern to filter, e.g. an email or name")
-    parser.add_argument("--days", type=float, default=7.0, help="Lookback window in days (default: 7)")
+    parser.add_argument(
+        "repo",
+        nargs="?",
+        default=os.environ.get("ANALYZER_REPO"),
+        help="GitHub URL or local Git repository path (or set ANALYZER_REPO in .env)",
+    )
+    parser.add_argument(
+        "--branch",
+        default=os.environ.get("ANALYZER_BRANCH") or None,
+        help="Branch to checkout before analysis (or ANALYZER_BRANCH)",
+    )
+    parser.add_argument(
+        "--author",
+        default=os.environ.get("ANALYZER_AUTHOR") or None,
+        help="Git author pattern to filter, e.g. an email or name (or ANALYZER_AUTHOR)",
+    )
+    parser.add_argument(
+        "--days",
+        type=float,
+        default=float(os.environ.get("ANALYZER_DAYS", "7")),
+        help="Lookback window in days (default: 7, or ANALYZER_DAYS)",
+    )
     parser.add_argument(
         "--workdir",
         type=Path,
-        default=Path(tempfile.gettempdir()) / "weekly-commit-analysis",
+        default=Path(os.environ.get("ANALYZER_WORKDIR", str(Path(tempfile.gettempdir()) / "weekly-commit-analysis"))),
+        help="Clone/update work directory (default: temp weekly-commit-analysis, or ANALYZER_WORKDIR)",
     )
-    parser.add_argument("--output", type=Path, default=Path("weekly_commit_analysis.md"))
-    parser.add_argument("--json-output", type=Path, help="Optional path for machine-readable JSON")
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path(os.environ.get("ANALYZER_OUTPUT", "weekly_commit_analysis.md")),
+        help="Markdown report output path (default: weekly_commit_analysis.md, or ANALYZER_OUTPUT)",
+    )
+    parser.add_argument(
+        "--json-output",
+        type=Path,
+        default=Path(os.environ["ANALYZER_JSON_OUTPUT"]) if os.environ.get("ANALYZER_JSON_OUTPUT") else None,
+        help="Optional path for machine-readable JSON (or ANALYZER_JSON_OUTPUT)",
+    )
     parser.add_argument(
         "--use-gemini",
         action="store_true",
-        help="Call Gemini API for narrative analysis",
+        default=env_bool("ANALYZER_USE_GEMINI"),
+        help="Call Gemini API for narrative analysis (or set ANALYZER_USE_GEMINI=true)",
     )
     parser.add_argument(
         "--model",
-        default="gemini-2.5-flash",
-        help="Gemini model for --use-gemini (default: gemini-2.5-flash)",
+        default=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+        help="Gemini model for --use-gemini (default: gemini-2.5-flash, or GEMINI_MODEL)",
     )
     parser.add_argument(
         "--print-prompt",
         action="store_true",
-        help="Print the analysis prompt without calling Gemini",
+        default=env_bool("ANALYZER_PRINT_PROMPT"),
+        help="Print the analysis prompt without calling Gemini (or ANALYZER_PRINT_PROMPT=true)",
     )
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if not args.repo:
+        parser.error("repo is required unless ANALYZER_REPO is set in .env or the environment")
+    return args
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_env_file()
     if sys.version_info < (3, 14, 2):
         raise RuntimeError("Python 3.14.2 or newer is required")
     args = parse_args(argv or sys.argv[1:])
